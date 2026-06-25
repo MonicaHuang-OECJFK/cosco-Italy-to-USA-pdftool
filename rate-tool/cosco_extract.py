@@ -1,0 +1,232 @@
+"""
+cosco_extract.py
+────────────────
+從 COSCO PDF 萃取 Direct Ports 與 Outports 的：
+  POL / POD / rate_20 / rate_40
+
+設計原則：從 header 列讀取欄位語意，不 hardcode col 號（除了 POL）。
+  - pod_col / rate20_col / rate40_col：從 header 關鍵字動態找
+  - 每個 col 讀取時同時試 col 和 col-1（±1 容錯漂移）
+  - POL col：Direct Ports 固定 [2]，Outports 固定 [4, 5]
+    （這兩個是 Service/Via 之後、POD 之前的固定欄，跨版本一致）
+
+支援任意欄數的 PDF 版本（已驗證 8 / 12 / 22 cols）。
+偵測兩表是否合併：table[0] 裡有沒有第二個 'POD (Terminal)' header。
+
+依賴：pip install pdfplumber
+用法：python cosco_extract.py <path_to_pdf>
+"""
+import re
+import sys
+import pdfplumber
+
+
+# ── 工具函式 ──────────────────────────────────────────────────
+
+def clean(val):
+    if val is None:
+        return ""
+    return str(val).replace("\n", " ").strip()
+
+def parse_usd(val):
+    """'1.475 USD' → 1475（歐式千位分隔）"""
+    val = clean(val)
+    val = re.sub(r"[^\d.,]", "", val)
+    if not val:
+        return None
+    if re.match(r"^\d{1,3}\.\d{3}$", val):
+        return int(val.replace(".", ""))
+    try:
+        return int(float(val))
+    except ValueError:
+        return None
+
+def fill_down(values):
+    last = ""
+    result = []
+    for v in values:
+        c = clean(v)
+        if c:
+            last = c
+        result.append(last)
+    return result
+
+def read_col(row, candidates):
+    """從 candidates 依序取第一個有值的欄"""
+    for c in candidates:
+        if 0 <= c < len(row) and clean(row[c]):
+            return clean(row[c])
+    return ""
+
+def parse_col(row, candidates):
+    """從 candidates 依序取第一個能 parse 的 USD 值"""
+    for c in candidates:
+        if 0 <= c < len(row):
+            val = parse_usd(row[c])
+            if val is not None:
+                return val
+    return None
+
+def is_header_row(row):
+    return "pod (terminal)" in " ".join(clean(v) for v in row).lower()
+
+def detect_split(tables):
+    """回傳 ('B', split_idx) 若兩表合一，否則 ('A', None)"""
+    for i in range(1, len(tables[0])):
+        if is_header_row(tables[0][i]):
+            return "B", i
+    return "A", None
+
+
+# ── Header 解析 ───────────────────────────────────────────────
+
+def build_col_map(header_rows):
+    """
+    從 header 找 pod_col、rate20_col、rate40_col。
+    回傳 dict，每個 key 對應 [header_col, header_col-1] 兩個候選。
+    """
+    keywords = {
+        "pod":     "pod (terminal)",
+        "rate_20": "20'",
+        "rate_40": "40'",
+    }
+    mapping = {}
+    for row in header_rows:
+        for col, val in enumerate(row):
+            v = clean(val).lower()
+            for field, kw in keywords.items():
+                if field not in mapping and kw in v:
+                    candidates = [col, col - 1] if col > 0 else [col]
+                    mapping[field] = candidates
+    return mapping
+
+
+# ── 通用萃取 ──────────────────────────────────────────────────
+
+def extract_rows(data_rows, col_map, pol_cols):
+    """
+    根據 col_map 讀取每列資料。
+
+    col_map：{'pod': [col, col-1], 'rate_20': [...], 'rate_40': [...]}
+    pol_cols：POL 的候選 col 列表（Direct=[2], Outports=[4,5]）
+
+    接續列：rate_20 的所有候選欄都沒有值 → 接續列，把 POD 串到上一筆。
+
+    Outports 群組內 fill_up（Ancona New York 問題）：我
+      Service 欄（col 0）有值 → 群組起點，群組內先 fill_down 再 fill_up。
+    """
+    pod_cands    = col_map.get("pod",     [3, 2])
+    rate20_cands = col_map.get("rate_20", [7, 6])
+    rate40_cands = col_map.get("rate_40", [8, 7]) 
+
+    # POL fill_down + 群組內 fill_up
+    pols_raw     = [read_col(r, pol_cols) for r in data_rows]
+    services_raw = [clean(r[0]) for r in data_rows]
+    group_starts = [i for i, s in enumerate(services_raw) if s] + [len(data_rows)]
+
+    pols = fill_down(pols_raw)
+    if len(group_starts) > 2:   # 多群組 → 群組內 fill_up
+        pols = [""] * len(pols_raw)
+        for g in range(len(group_starts) - 1):
+            start, end = group_starts[g], group_starts[g + 1]
+            gv = pols_raw[start:end]
+            filled = fill_down(gv)
+            next_val = ""
+            for i in range(len(gv) - 1, -1, -1):
+                if gv[i]:
+                    next_val = gv[i]
+                elif next_val:
+                    filled[i] = next_val
+            for i, v in enumerate(filled):
+                pols[start + i] = v
+
+    results = []
+    for i, row in enumerate(data_rows):
+        r20 = parse_col(row, rate20_cands)
+        r40 = parse_col(row, rate40_cands)
+
+        if r20 is None:
+            # 接續列：POD 碎片串到上一筆
+            pod_frag = read_col(row, pod_cands)
+            if results and pod_frag:
+                results[-1]["pod"] += " " + pod_frag
+            continue
+
+        # POD：試所有候選欄（含 col+1 應對 Miami 右漂）
+        pod_cands_extended = pod_cands + [pod_cands[0] + 1]
+        pod = read_col(row, pod_cands_extended)
+
+        if not pod:
+            continue
+
+        results.append({
+            "pol":     pols[i],
+            "pod":     pod,
+            "rate_20": r20,
+            "rate_40": r40,
+        })
+
+    return results
+
+
+# ── Direct Ports / Outports ───────────────────────────────────
+
+def parse_direct(raw):
+    """
+    header 1~2 列。
+    POL 固定在 col 2（跨所有版本一致：Service=0, Via=1, POL=2）。
+    """
+    n_header = 1
+    for i in range(1, min(3, len(raw))):
+        if is_header_row(raw[i]) or not any(clean(v) for v in raw[i]):
+            n_header = i + 1
+        else:
+            break
+
+    col_map = build_col_map(raw[:n_header])
+    pod_c   = col_map["pod"][0] if "pod" in col_map else 3
+    pol_cols = [2] if pod_c <= 4 else [4]
+    return extract_rows(raw[n_header:], col_map, pol_cols=pol_cols)
+
+
+def parse_outports(raw):
+    """
+    header 1 列。
+    POL col 根據 pod_col 動態決定：
+      pod_col <= 4（窄版如 cosco5 8 cols）→ pol_cols = [2]
+      pod_col > 4 （寬版如 cosco_pdf 22 cols）→ pol_cols = [4, 5]
+    """
+    col_map = build_col_map(raw[:1])
+    pod_c   = col_map["pod"][0] if "pod" in col_map else 3
+    pol_cols = [2] if pod_c <= 4 else [4, 5]
+    return extract_rows(raw[1:], col_map, pol_cols=pol_cols)
+
+
+# ── 對外介面 ──────────────────────────────────────────────────
+
+def extract(pdf_path):
+    with pdfplumber.open(pdf_path) as pdf:
+        tables = pdf.pages[0].extract_tables()
+
+    version, split_row = detect_split(tables)
+
+    if version == "A":
+        direct   = parse_direct(tables[0])
+        outports = parse_outports(tables[1])
+    else:
+        raw      = tables[0]
+        direct   = parse_direct(raw[:split_row])
+        outports = parse_outports(raw[split_row:])
+
+    return direct, outports
+
+
+if __name__ == "__main__":
+    path = sys.argv[1] if len(sys.argv) > 1 else "cosco.pdf"
+    direct, outports = extract(path)
+    print(f"\n── Direct Ports ({len(direct)} rows) ──")
+    for r in direct:
+        print(r)
+    print(f"\n── Outports ({len(outports)} rows) ──")
+    for r in outports:
+        print(r)
