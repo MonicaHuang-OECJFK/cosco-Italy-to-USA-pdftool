@@ -127,12 +127,14 @@ def update_oft_rates(excel_path, all_rates, output_path=None, max_scan_rows=38):
     col_20, col_40, col_40hc = _find_oft_cols(ws, pod_col, pod_header_row)
 
     # 5. 先清空所有 OFT 欄位的值（20' / 40' / 40HC）
+    #    只清空純數值的格子，有公式的格子不動
     data_start_row = max(por_header_row, pod_header_row) + 1
     scan_end_row = data_start_row + max_scan_rows - 1
     for row_num in range(data_start_row, scan_end_row + 1):
-        ws.cell(row_num, col_20).value   = None
-        ws.cell(row_num, col_40).value   = None
-        ws.cell(row_num, col_40hc).value = None
+        for col in (col_20, col_40, col_40hc):
+            cell = ws.cell(row_num, col)
+            if cell.data_type != 'f':   # 'f' = formula，公式格不動
+                cell.value = None
 
     # 6. 寫入新 rate
     updated_count = 0
