@@ -2,7 +2,11 @@
 to_excel.py
 ───────────
 從 COSCO PDF 萃取費率資料並輸出成 Excel。
-包含兩個 tab：Direct Ports、Outports
+
+包含：
+  - Direct Ports tab：原始萃取結果
+  - Outports tab：原始萃取結果
+  - All Rates tab：Direct Ports + Outports 合併，且 POL 用 '/' 拆開成獨立列
 
 用法：python to_excel.py <path_to_pdf>
 輸出：pdf_extract.xlsx（執行目錄）
@@ -12,9 +16,10 @@ to_excel.py
 
 import sys
 import os
+import re
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
-from cosco_extract import extract
+from coscopdf_extract import extract, split_pol
 
 
 HEADER_FILL = PatternFill("solid", start_color="1F3864")
@@ -43,6 +48,8 @@ def write_rate_sheet(ws, title, rows):
     ws.column_dimensions["D"].width = 14
 
 
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: python to_excel.py <path_to_pdf>")
@@ -51,13 +58,18 @@ def main():
     pdf_path = sys.argv[1]
     direct, outports = extract(pdf_path)
 
+    # 合併 + 拆開 POL
+    combined = direct + outports
+    all_rates = split_pol(combined)
+
     wb = Workbook()
     write_rate_sheet(wb.active,         "Direct Ports", direct)
     write_rate_sheet(wb.create_sheet(), "Outports",     outports)
+    write_rate_sheet(wb.create_sheet(), "All Rates",    all_rates)
 
     out_path = os.path.join(os.getcwd(), "pdf_extract.xlsx")
     wb.save(out_path)
-    print(f"Saved: {out_path}")i 
+    print(f"Saved: {out_path}")
 
 
 if __name__ == "__main__":

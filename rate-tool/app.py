@@ -1,55 +1,89 @@
 import streamlit as st
-from parsers.cosco_parser import parse_cosco_pdf, parse_wharfage
-from excel.excel_writer_test import update_excel_rates_test
 import tempfile
+import os
+from coscopdf_extract import extract
+from coscopdf_extract import split_pol
+from excel_writer import update_oft_rates
 
-st.title("Non TP COSCO SBS Rate Updater")
+st.title("COSCO Rate Updater")
+
 st.markdown("#### 🔧 What this tool does")
 st.markdown("""
-- ✅ Copies current rates (W, X, Y) into old rate columns (AD, AE, AF)
-- 🚢 Updates Ocean Freight rates (H, I, J)
-- ⚓ Updates Wharfage rates (Q, R, S)
+- 📄 Extracts **Ocean Freight rates** from COSCO PDF (Direct Ports + Outports)
+- ✍️ Updates **OFT 20' / 40' / 40HC** in the cheatsheet
+- 🗺️ Uses the **Mapping tab** in the cheatsheet to match PDF POL/POD → cheatsheet POR/POD
 """)
 
 st.markdown("#### ⚠️ Important Notes")
 st.markdown("""
-- ETS is **not updated** (exchange rate dependent)
-- Please update the **valid date** manually
-- Do **NOT** delete or insert columns (this will break the template)
+- ETS is **not updated** (exchange rate dependent — please update manually)
+- Please update the **valid date** manually after download
+- Do **NOT** delete or insert columns in the cheatsheet (this will break column detection)
+- To add new POL/POD pairs, add a row in the **Mapping tab** of the cheatsheet
 """)
 
-# 👉 線放這裡（你要的位置）
 st.markdown("<br>", unsafe_allow_html=True)
 
-pdf_file = st.file_uploader("Upload pdf", type="pdf")
-excel_file = st.file_uploader("Upload excel", type="xlsx") 
+pdf_file   = st.file_uploader("Upload COSCO PDF", type="pdf")
+excel_file = st.file_uploader("Upload Cheatsheet (xlsx, must contain Mapping tab)", type="xlsx")
 
 if st.button("Run"):
-
     if pdf_file and excel_file:
+        with st.spinner("Processing..."):
+            try:
+                # Save uploads to temp files
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
+                    tmp_pdf.write(pdf_file.read())
+                    pdf_path = tmp_pdf.name
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
-            tmp_pdf.write(pdf_file.read())
-            pdf_path = tmp_pdf.name
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_excel:
+                    tmp_excel.write(excel_file.read())
+                    excel_path = tmp_excel.name
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_excel:
-            tmp_excel.write(excel_file.read())
-            excel_path = tmp_excel.name
+                output_path = excel_path.replace(".xlsx", "_updated.xlsx")
 
-        # ✅ parse
-        rates = parse_cosco_pdf(pdf_path)
-        whf_rates = parse_wharfage(pdf_path)
+                # Extract rates from PDF
+                direct, outports = extract(pdf_path)
+                combined  = direct + outports
+                all_rates = split_pol(combined)   # split POL by '/'
 
-        # ✅ update
-        update_excel_rates_test(excel_path, rates, whf_rates)
+                # Write into cheatsheet
+                updated_count, skipped = update_oft_rates(
+                    excel_path, all_rates, output_path=output_path
+                )
 
-        # ✅ download
-        with open(excel_path, "rb") as f:
-            st.download_button(
-                "Download Updated Excel",
-                f,
-                file_name="updated_cheatsheet.xlsx"
-            )
+                # Result summary
+                st.success(f"✅ Updated {updated_count} rows successfully")
 
+                if skipped:
+                    # Only show rows that are actually in the Mapping tab
+                    # (skipped = rows in sheet with no matching rate, which is expected for non-mapped rows)
+                    st.info(f"ℹ️ {len(skipped)} rows in the cheatsheet had no matching rate in PDF "
+                            f"(this is normal for rows not in the Mapping tab)")
+                    with st.expander("See skipped rows"):
+                        for row_num, por, pod in skipped[:20]:
+                            st.text(f"  row {row_num}: POR={por}  POD={pod}")
+
+                # Download button
+                with open(output_path, "rb") as f:
+                    st.download_button(
+                        "📥 Download Updated Cheatsheet",
+                        f,
+                        file_name="updated_cheatsheet.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+
+            except ValueError as e:
+                st.error(f"❌ Error: {e}")
+            except Exception as e:
+                st.error(f"❌ Unexpected error: {e}")
+                raise
+            finally:
+                # Clean up temp files
+                for path in [pdf_path, excel_path]:
+                    try:
+                        os.unlink(path)
+                    except Exception:
+                        pass
     else:
-        st.warning("Please upload both PDF and Excel.")
+        st.warning("Please upload both PDF and Cheatsheet.")

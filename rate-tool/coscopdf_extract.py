@@ -16,6 +16,7 @@ cosco_extract.py
 依賴：pip install pdfplumber
 用法：python cosco_extract.py <path_to_pdf>
 """
+
 import re
 import sys
 import pdfplumber
@@ -29,15 +30,20 @@ def clean(val):
     return str(val).replace("\n", " ").strip()
 
 def parse_usd(val):
-    """'1.475 USD' → 1475（歐式千位分隔）"""
-    val = clean(val)
-    val = re.sub(r"[^\d.,]", "", val)
-    if not val:
+    """
+    '1.475 USD' → 1475（歐式千位分隔）
+    必須包含 USD 或 $ 才算是 rate，純數字（如 Transit '57'）回傳 None。
+    """
+    s = clean(val)
+    if not re.search(r'USD|\$', s, re.IGNORECASE):
         return None
-    if re.match(r"^\d{1,3}\.\d{3}$", val):
-        return int(val.replace(".", ""))
+    s = re.sub(r"[^\d.,]", "", s)
+    if not s:
+        return None
+    if re.match(r"^\d{1,3}\.\d{3}$", s):
+        return int(s.replace(".", ""))
     try:
-        return int(float(val))
+        return int(float(s))
     except ValueError:
         return None
 
@@ -112,12 +118,12 @@ def extract_rows(data_rows, col_map, pol_cols):
 
     接續列：rate_20 的所有候選欄都沒有值 → 接續列，把 POD 串到上一筆。
 
-    Outports 群組內 fill_up（Ancona New York 問題）：我
+    Outports 群組內 fill_up（Ancona New York 問題）：
       Service 欄（col 0）有值 → 群組起點，群組內先 fill_down 再 fill_up。
     """
     pod_cands    = col_map.get("pod",     [3, 2])
     rate20_cands = col_map.get("rate_20", [7, 6])
-    rate40_cands = col_map.get("rate_40", [8, 7]) 
+    rate40_cands = col_map.get("rate_40", [8, 7])
 
     # POL fill_down + 群組內 fill_up
     pols_raw     = [read_col(r, pol_cols) for r in data_rows]
@@ -222,7 +228,7 @@ def extract(pdf_path):
 
 
 if __name__ == "__main__":
-    path = sys.argv[1] if len(sys.argv) > 1 else "cosco.pdf"
+    path = sys.argv[1] if len(sys.argv) > 1 else "cosco_pdf.pdf"
     direct, outports = extract(path)
     print(f"\n── Direct Ports ({len(direct)} rows) ──")
     for r in direct:
@@ -230,3 +236,28 @@ if __name__ == "__main__":
     print(f"\n── Outports ({len(outports)} rows) ──")
     for r in outports:
         print(r)
+
+
+def split_pol(rows):
+    """
+    把 POL 用 '/' 拆開成獨立列，其餘欄位複製。
+
+    例如：
+    {'pol': 'La Spezia (LSCT) / Genova (VTE)', 'pod': 'New York', ...}
+    →
+    {'pol': 'La Spezia (LSCT)', 'pod': 'New York', ...}
+    {'pol': 'Genova (VTE)',     'pod': 'New York', ...}
+    """
+    result = []
+    for row in rows:
+        pol_parts = [p.strip() for p in row["pol"].split("/") if p.strip()]
+        if not pol_parts:
+            pol_parts = [row["pol"]]
+        for pol in pol_parts:
+            result.append({
+                "pol":     pol,
+                "pod":     row["pod"],
+                "rate_20": row["rate_20"],
+                "rate_40": row["rate_40"],
+            })
+    return result
