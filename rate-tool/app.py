@@ -1,25 +1,24 @@
 import streamlit as st
 import tempfile
 import os
+from datetime import date
 from coscopdf_extract import extract
 from coscopdf_extract import split_pol
 from excel_writer import update_oft_rates
 
-st.title("COSCO Rate Updater")
+st.title("COSCO Italy to USA rate updater")
 
 st.markdown("#### 🔧 What this tool does")
 st.markdown("""
 - 📄 Extracts **Ocean Freight rates** from COSCO PDF (Direct Ports + Outports)
 - ✍️ Updates **OFT 20' / 40' / 40HC** in the cheatsheet
-- 🗺️ Uses the **Mapping tab** in the cheatsheet to match PDF POL/POD → cheatsheet POR/POD
 """)
 
 st.markdown("#### ⚠️ Important Notes")
 st.markdown("""
-- ETS is **not updated** (exchange rate dependent — please update manually)
-- Please update the **valid date** manually after download
-- Do **NOT** delete or insert columns in the cheatsheet (this will break column detection)
-- To add new POL/POD pairs, add a row in the **Mapping tab** of the cheatsheet
+- If a PDF has **new or removed** POL/POD lanes, remember to add/delete the
+  corresponding row in the cheatsheet, and add the matching pair to the **Mapping**
+  tab with the **exact** POL/POD spelling as it appears in the PDF extraction
 """)
 
 st.markdown("<br>", unsafe_allow_html=True)
@@ -69,7 +68,7 @@ if st.button("Run"):
                     st.download_button(
                         "📥 Download Updated Cheatsheet",
                         f,
-                        file_name="updated_cheatsheet.xlsx",
+                        file_name=f"COSCO Italy to USA Eff {date.today().strftime('%m-%d-%Y')}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
 
