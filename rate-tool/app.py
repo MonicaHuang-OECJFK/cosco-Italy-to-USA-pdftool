@@ -14,9 +14,10 @@ st.markdown("#### 🔧 What this tool does")
 st.markdown("""
 - 📄 Extracts **Ocean Freight rates** from COSCO PDF (Direct Ports + Outports)
 - ✍️ Updates **OFT 20' / 40' / 40HC** in the cheatsheet
-- 🏷️ Updates the **Rate Reference** (e.g. "TLI GL JULY") in cheatsheet cell 
+- 🏷️ Updates the **Rate Reference** (e.g. "TLI GL JULY") in cheatsheet cell **OFT!B1**
 - 🚂 Updates **US inland 20DV / 40DV/40HQ** rates from the Rail Ramp table
-  — if the PDF lists more than one rate period, a separate updated cheatsheet is produced automatically for each period
+  — if the PDF lists **more than one rate period**, a separate updated cheatsheet is
+  produced **automatically for each period**
 """)
 
 st.markdown("#### ⚠️ Important Notes")
@@ -24,6 +25,10 @@ st.markdown("""
 - If a PDF has **new or removed** POL/POD lanes, remember to add/delete the
   corresponding row in the cheatsheet, and add the matching pair to the **Mapping**
   tab with the **exact** POL/POD spelling as it appears in the PDF extraction
+- US inland rows are matched by **Location + Routing via** (e.g. "ATLANTA, GA" + "SAV")
+  — if a PDF adds/removes a rail ramp location, add/delete the matching row in the
+  **US inland** tab first. If the Location matches but the Routing via doesn't, the
+  row is **not** updated and is flagged for you to check instead
 """)
 
 st.markdown("<br>", unsafe_allow_html=True)
@@ -56,17 +61,9 @@ if st.button("Run"):
                 periods = list_us_inland_periods(pdf_path)
                 periods_to_run = periods if periods else [None]
 
-                if rate_ref:
-                    st.info(f"🏷️ Rate Reference: **{rate_ref}**")
-                else:
-                    st.warning("⚠️ Could not find a Rate Reference value in the PDF")
+                file_name = f"COSCO Italy to USA Eff {date.today().strftime('%m-%d-%Y')}.xlsx"
 
-                if periods:
-                    st.info(f"📅 Detected {len(periods)} rate periods in the US inland "
-                             f"table: **{', '.join(periods)}** — producing one cheatsheet per period")
-
-                today_str = date.today().strftime('%m-%d-%Y')
-
+                items = []
                 for period in periods_to_run:
                     ramp_rows = extract_us_inland(pdf_path, period=period)
 
@@ -81,49 +78,31 @@ if st.button("Run"):
                         output_path=out_path,
                     )
 
-                    label = f" ({period})" if period else ""
-                    st.success(f"✅{label} Updated {result['oft_updated']} OFT rows, "
-                               f"{result['inland_updated']} US inland rows")
-
-                    if result["oft_skipped"]:
-                        with st.expander(f"ℹ️{label} {len(result['oft_skipped'])} OFT rows "
-                                          f"with no matching rate in PDF (normal for rows "
-                                          f"not in the Mapping tab)"):
-                            for row_num, por, pod in result["oft_skipped"][:20]:
-                                st.text(f"  row {row_num}: POR={por}  POD={pod}")
-
-                    if result["inland_skipped"]:
-                        with st.expander(f"ℹ️{label} {len(result['inland_skipped'])} "
-                                          f"US inland rows with no matching PDF data"):
-                            for row_num, location in result["inland_skipped"][:20]:
-                                st.text(f"  row {row_num}: Location={location}")
-
-                    if result["inland_mismatched"]:
-                        with st.expander(f"⚠️{label} {len(result['inland_mismatched'])} "
-                                          f"US inland rows skipped — Location matched but "
-                                          f"Routing via didn't (not written, please check)"):
-                            for row_num, location, cs_via, pdf_via in result["inland_mismatched"][:20]:
-                                st.text(f"  row {row_num}: Location={location}  "
-                                        f"cheatsheet Routing via={cs_via}  PDF VIA POD={pdf_via}")
-
-                    file_name = (f"COSCO Italy to USA Eff {today_str}"
-                                 f"{' ' + period if period else ''}.xlsx")
+                    # Read bytes into memory now — the temp file gets deleted
+                    # below, but a rerun (e.g. from clicking a download button)
+                    # must not lose this data.
                     with open(out_path, "rb") as f:
-                        st.download_button(
-                            f"📥 Download{label}",
-                            f,
-                            file_name=file_name,
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key=out_path,
-                        )
+                        file_bytes = f.read()
+
+                    items.append({"period": period, "result": result, "file_bytes": file_bytes})
+
+                # Persist results in session_state so clicking a download button
+                # (which triggers a rerun) doesn't wipe the other results/buttons.
+                st.session_state["cosco_results"] = {
+                    "rate_ref":  rate_ref,
+                    "periods":   periods,
+                    "file_name": file_name,
+                    "items":     items,
+                }
 
             except ValueError as e:
                 st.error(f"❌ Error: {e}")
+                st.session_state.pop("cosco_results", None)
             except Exception as e:
                 st.error(f"❌ Unexpected error: {e}")
+                st.session_state.pop("cosco_results", None)
                 raise
             finally:
-                # Clean up temp files
                 for path in [pdf_path, excel_path, *tmp_outputs]:
                     if path:
                         try:
@@ -132,3 +111,41 @@ if st.button("Run"):
                             pass
     else:
         st.warning("Please upload both PDF and Cheatsheet.")
+
+# Render persisted results — this runs on every rerun (including the one
+# triggered by clicking a download button), so results stay on screen.
+if "cosco_results" in st.session_state:
+    data = st.session_state["cosco_results"]
+
+    if data["rate_ref"]:
+        st.info(f"🏷️ Rate Reference: **{data['rate_ref']}**")
+    else:
+        st.warning("⚠️ Could not find a Rate Reference value in the PDF")
+
+    if data["periods"]:
+        st.info(f"📅 Detected {len(data['periods'])} rate periods in the US inland "
+                 f"table: **{', '.join(data['periods'])}** — producing one cheatsheet per period")
+
+    for item in data["items"]:
+        period = item["period"]
+        result = item["result"]
+        label  = f" ({period})" if period else ""
+
+        st.success(f"✅{label} Updated {result['oft_updated']} OFT rows, "
+                   f"{result['inland_updated']} US inland rows")
+
+        if result["inland_mismatched"]:
+            with st.expander(f"⚠️{label} {len(result['inland_mismatched'])} "
+                              f"US inland rows skipped — Location matched but "
+                              f"Routing via didn't (not written, please check)"):
+                for row_num, location, cs_via, pdf_via in result["inland_mismatched"][:20]:
+                    st.text(f"  row {row_num}: Location={location}  "
+                            f"cheatsheet Routing via={cs_via}  PDF VIA POD={pdf_via}")
+
+        st.download_button(
+            f"📥 Download{label}",
+            item["file_bytes"],
+            file_name=data["file_name"],
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=f"dl_{period}",
+        )
