@@ -92,9 +92,10 @@ def build_col_map(header_rows):
     回傳 dict，每個 key 對應 [header_col, header_col-1] 兩個候選。
     """
     keywords = {
-        "pod":     "pod (terminal)",
-        "rate_20": "20'",
-        "rate_40": "40'",
+        "pod":      "pod (terminal)",
+        "rate_20":  "20'",
+        "rate_40":  "40'",
+        "rate_ref": "rate ref",
     }
     mapping = {}
     for row in header_rows:
@@ -206,6 +207,182 @@ def parse_outports(raw):
     pod_c   = col_map["pod"][0] if "pod" in col_map else 3
     pol_cols = [2] if pod_c <= 4 else [4, 5]
     return extract_rows(raw[1:], col_map, pol_cols=pol_cols)
+
+
+# ── Rate Reference（例如 'TLI GL JULY'）────────────────────────
+
+def extract_rate_ref(pdf_path):
+    """
+    萃取 Rate Reference 代碼（例如 'TLI GL JULY'），
+    這個值整份 PDF 通常只有一種，寫在 Direct Ports 表格最右邊那欄。
+
+    做法：
+      1. 優先用 header 關鍵字 'rate ref' 找欄位（跟 pod/rate_20 一樣 ±1 容錯）
+      2. 找不到 header 就 fallback：掃描第一頁所有表格，
+         抓第一個符合 'TLI ...' 開頭 pattern 的儲存格
+    """
+    with pdfplumber.open(pdf_path) as pdf:
+        tables = pdf.pages[0].extract_tables()
+
+    if tables:
+        col_map = build_col_map(tables[0][:2])
+        if "rate_ref" in col_map:
+            for row in tables[0][2:]:
+                val = read_col(row, col_map["rate_ref"])
+                if val:
+                    return val
+
+    for table in tables:
+        for row in table:
+            for cell in row:
+                v = clean(cell)
+                if re.match(r"^TLI\b", v, re.IGNORECASE):
+                    return v
+
+    return None
+
+
+# ── US Inland（Rail Ramp）表格 ──────────────────────────────────
+
+def build_ramp_col_map(header_rows):
+    """
+    從 Rail Ramp 表格的 header 找 location / via_pod / rate_20 / rate_40 欄。
+    每個欄位漂移方向不固定，所以候選欄同時含 col-1 / col / col+1。
+    """
+    keywords = {
+        "location": "rail ramp",
+        "via_pod":  "via pod",
+        "rate_20":  "20'box",
+        "rate_40":  "40'bx",
+    }
+    mapping = {}
+    for row in header_rows:
+        for col, val in enumerate(row):
+            v = clean(val).lower()
+            for field, kw in keywords.items():
+                if field not in mapping and kw in v:
+                    lo = col - 1 if col > 0 else col
+                    mapping[field] = [col, col + 1, lo]
+    return mapping
+
+
+def _detect_ramp_periods(header_rows):
+    """
+    有些 PDF 的 Rail Ramp 表格會同時列出多組期別（例如 APRIL / MAY 兩組
+    20'box / 40'bx/HC 費率並排）。這個函式偵測是否有這種狀況。
+
+    做法：掃描第二列 header（期別列，例如 'APRIL' / 'MAY'），
+    每個有值的欄位，往同一欄（含 ±1 容錯）找第一列 header 是
+    "20'box" 還是 "40'bx/HC"，藉此歸類。
+
+    回傳 {period_label: {"rate_20": [col...], "rate_40": [col...]}}
+    只有一組期別（沒有這種期別列）就回傳 {}
+    """
+    if len(header_rows) < 2:
+        return {}
+
+    row0, row1 = header_rows[0], header_rows[1]
+    periods = {}
+    for col, val in enumerate(row1):
+        label = clean(val).upper()
+        if not label:
+            continue
+
+        kw = ""
+        for c in (col, col - 1, col + 1):
+            if 0 <= c < len(row0):
+                v = clean(row0[c]).lower()
+                if "20'box" in v or "40'bx" in v:
+                    kw = v
+                    break
+
+        if "20'box" in kw:
+            periods.setdefault(label, {}).setdefault("rate_20", []).append(col)
+        elif "40'bx" in kw:
+            periods.setdefault(label, {}).setdefault("rate_40", []).append(col)
+
+    return periods
+
+
+def list_us_inland_periods(pdf_path):
+    """
+    檢查 PDF 的 Rail Ramp 表格是否同時列出多組期別（例如 ['APRIL', 'MAY']）。
+    沒有這種狀況（只有一組費率）就回傳空 list。
+    """
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            for table in page.extract_tables():
+                header_blob = " ".join(
+                    clean(v) for row in table[:2] for v in row
+                ).lower()
+                if "rail ramp" in header_blob and "via pod" in header_blob:
+                    return list(_detect_ramp_periods(table[:2]).keys())
+    return []
+
+
+def _parse_ramp_rows(table, period=None):
+    col_map = build_ramp_col_map(table[:2])
+
+    loc_cands = col_map.get("location", [1, 2, 0])
+    pod_cands = col_map.get("via_pod",  [4, 3, 5])
+
+    periods = _detect_ramp_periods(table[:2])
+    if periods:
+        if period is None:
+            raise ValueError(
+                f"此 PDF 的 Rail Ramp 表格有多組期別：{', '.join(periods)}，"
+                f"請指定 period 參數（例如 period='MAY'）"
+            )
+        period_key = period.strip().upper()
+        if period_key not in periods:
+            raise ValueError(
+                f"找不到期別「{period}」，PDF 裡的期別有：{', '.join(periods)}"
+            )
+        r20_cands = periods[period_key].get("rate_20", col_map.get("rate_20", [7, 6, 8]))
+        r40_cands = periods[period_key].get("rate_40", col_map.get("rate_40", [9, 8, 10]))
+    else:
+        r20_cands = col_map.get("rate_20", [7, 6, 8])
+        r40_cands = col_map.get("rate_40", [9, 8, 10])
+
+    results = []
+    for row in table[2:]:
+        location = read_col(row, loc_cands)
+        via_pod  = read_col(row, pod_cands)
+        if not location or not via_pod:
+            continue
+
+        results.append({
+            "location": location,
+            "via_pod":  via_pod,
+            "rate_20":  parse_col(row, r20_cands),   # 'No 20box' 沒有 USD → None
+            "rate_40":  parse_col(row, r40_cands),
+        })
+
+    return results
+
+
+def extract_us_inland(pdf_path, period=None):
+    """
+    萃取 'CY US RAMP' 表格（Rail Ramp Location / VIA POD / 20'box / 40'bx/HC）。
+    掃描每一頁的每個表格，找到含 'rail ramp' 與 'via pod' header 的那個。
+
+    參數：
+      period : 如果該 PDF 的 Rail Ramp 表格同時列出多組期別（例如 'APRIL' / 'MAY'），
+               需要指定要抓哪一組；只有一組期別時可省略。
+               可用 list_us_inland_periods() 先查詢有哪些期別可選。
+
+    回傳 list of dict：{"location", "via_pod", "rate_20", "rate_40"}
+    找不到 Rail Ramp 表格就回傳空 list。
+    """
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            for table in page.extract_tables():
+                header_blob = " ".join(
+                    clean(v) for row in table[:2] for v in row
+                ).lower()
+                if "rail ramp" in header_blob and "via pod" in header_blob:
+                    return _parse_ramp_rows(table, period=period)
+    return []
 
 
 # ── 對外介面 ──────────────────────────────────────────────────

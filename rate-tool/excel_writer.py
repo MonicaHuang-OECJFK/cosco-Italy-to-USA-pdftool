@@ -2,14 +2,21 @@
 excel_writer.py
 ───────────────
 讀取 cheatsheet 的 Mapping tab，
-把從 PDF 萃取的 OFT rate 寫入 OFT sheet 的黃色欄位。
+把從 PDF 萃取的資料寫入 cheatsheet：
+  - OFT sheet 的 20' / 40' / 40HC（依 POR + POD 對照）
+  - OFT!B1 的 Rate Reference（例如 'TLI GL JULY'）
+  - US inland sheet 的 20DV / 40DV/40HQ（依 Location 對照）
 
-流程：
+流程（OFT）：
 1. 讀取 Mapping tab → 建立 (PDF_POL, PDF_POD) → (POR, POD) 對照字典
 2. 掃描任意 row 找到 POD header → 得到 pod_col 和 header_row
 3. POD 右邊 +2 格是 20'，往上驗證 header 是 "20'" → 確認欄位正確
 4. +3 = 40'，+4 = 40HC
 5. 掃描資料列，用 POR + POD 匹配，寫入 rate
+
+流程（US inland）：
+1. 找 Location / 20DV / 40DV/40HQ header
+2. 用 Location 文字（大小寫不分）直接對照 PDF 萃取結果，寫入 rate
 """
 
 import openpyxl
@@ -95,39 +102,26 @@ def _build_rate_lookup(all_rates, mapping):
     return lookup
 
 
-def update_oft_rates(excel_path, all_rates, output_path=None, max_scan_rows=38):
+def _write_oft_rates(wb, all_rates, max_scan_rows=38):
     """
-    主函式：把 all_rates 寫入 cheatsheet 的 OFT sheet。
+    把 all_rates 寫入 cheatsheet 的 OFT sheet。
 
-    參數：
-      excel_path  : cheatsheet 的路徑（含 Mapping tab）
-      all_rates   : coscopdf_extract 產出的 list of dict
-                    每筆含 pol / pod / rate_20 / rate_40
-      output_path : 輸出路徑，None 則直接覆蓋原檔
-
-    回傳：
-      (updated_count, skipped_rows)
+    回傳 (updated_count, skipped_rows)
       updated_count : 成功寫入的列數
       skipped_rows  : 找不到對應 rate 的 (row_num, por, pod) list
     """
-    wb = openpyxl.load_workbook(excel_path)
     ws = wb["OFT"]
 
-    # 1. 讀取 mapping
     mapping = _load_mapping(wb)
-
-    # 2. 建立 rate lookup
     rate_lookup = _build_rate_lookup(all_rates, mapping)
 
-    # 3. 找 POR / POD header（掃描任意 row，不假設固定在哪行）
     por_header_row, por_col = _find_header(ws, "POR")
     pod_header_row, pod_col = _find_header(ws, "POD")
 
-    # 4. 從 POD +2 找 OFT 的 20'/40'/40HC 欄，往上驗證 "20'" header
     col_20, col_40, col_40hc = _find_oft_cols(ws, pod_col, pod_header_row)
 
-    # 5. 先清空所有 OFT 欄位的值（20' / 40' / 40HC）
-    #    只清空純數值的格子，有公式的格子不動
+    # 先清空所有 OFT 欄位的值（20' / 40' / 40HC）
+    # 只清空純數值的格子，有公式的格子不動
     data_start_row = max(por_header_row, pod_header_row) + 1
     scan_end_row = data_start_row + max_scan_rows - 1
     for row_num in range(data_start_row, scan_end_row + 1):
@@ -136,7 +130,6 @@ def update_oft_rates(excel_path, all_rates, output_path=None, max_scan_rows=38):
             if cell.data_type != 'f':   # 'f' = formula，公式格不動
                 cell.value = None
 
-    # 6. 寫入新 rate
     updated_count = 0
     skipped_rows = []
 
@@ -159,6 +152,127 @@ def update_oft_rates(excel_path, all_rates, output_path=None, max_scan_rows=38):
 
         updated_count += 1
 
+    return updated_count, skipped_rows
+
+
+def _write_rate_ref(wb, rate_ref):
+    """
+    把 Rate Reference（例如 'TLI GL JULY'）寫入 OFT sheet 的 B1。
+    rate_ref 為 None 時不動作。
+    """
+    if not rate_ref:
+        return False
+
+    ws = wb["OFT"]
+    cell = ws["B1"]
+    if cell.data_type != 'f':   # 公式格不動
+        cell.value = rate_ref
+        return True
+    return False
+
+
+def _write_us_inland(wb, ramp_rows, max_scan_rows=40):
+    """
+    把 ramp_rows（extract_us_inland 產出）寫入 'US inland' sheet 的
+    20DV / 40DV/40HQ 欄，用 Location 文字（大小寫不分）對照。
+
+    回傳 (updated_count, skipped_rows)
+      updated_count : 成功寫入的列數
+      skipped_rows  : cheatsheet 裡找不到對應 PDF 資料的 (row_num, location) list
+    """
+    if "US inland" not in wb.sheetnames:
+        raise ValueError("找不到 'US inland' tab")
+
+    ws = wb["US inland"]
+
+    header_row, loc_col = _find_header(ws, "Location")
+    _, col_20 = _find_header(ws, "20DV")
+    _, col_40 = _find_header(ws, "40DV/40HQ")
+
+    ramp_lookup = {r["location"].strip().upper(): r for r in ramp_rows}
+
+    data_start_row = header_row + 1
+    scan_end_row = data_start_row + max_scan_rows - 1
+
+    updated_count = 0
+    skipped_rows = []
+
+    for row_num in range(data_start_row, scan_end_row + 1):
+        location = str(ws.cell(row_num, loc_col).value or "").strip().upper()
+        if not location:
+            continue
+
+        if location not in ramp_lookup:
+            skipped_rows.append((row_num, location))
+            continue
+
+        ramp = ramp_lookup[location]
+
+        cell_20 = ws.cell(row_num, col_20)
+        if cell_20.data_type != 'f':
+            cell_20.value = ramp["rate_20"] if ramp["rate_20"] is not None else "-"
+
+        cell_40 = ws.cell(row_num, col_40)
+        if cell_40.data_type != 'f':
+            cell_40.value = ramp["rate_40"] if ramp["rate_40"] is not None else "-"
+
+        updated_count += 1
+
+    return updated_count, skipped_rows
+
+
+def update_cheatsheet(excel_path, all_rates, rate_ref=None, ramp_rows=None,
+                       output_path=None, max_scan_rows=38):
+    """
+    主函式：把 PDF 萃取結果寫入 cheatsheet（單次讀檔、單次存檔）。
+
+    參數：
+      excel_path  : cheatsheet 的路徑（含 Mapping tab）
+      all_rates   : coscopdf_extract.extract() + split_pol() 產出的 list of dict
+                    每筆含 pol / pod / rate_20 / rate_40
+      rate_ref    : coscopdf_extract.extract_rate_ref() 產出的字串，例如 'TLI GL JULY'
+                    None 則不寫入 B1
+      ramp_rows   : coscopdf_extract.extract_us_inland() 產出的 list of dict
+                    None 或空 list 則不更新 US inland tab
+      output_path : 輸出路徑，None 則直接覆蓋原檔
+
+    回傳 dict：
+      {
+        "oft_updated":   int,
+        "oft_skipped":   [(row_num, por, pod), ...],
+        "rate_ref_written": bool,
+        "inland_updated": int,
+        "inland_skipped": [(row_num, location), ...],
+      }
+    """
+    wb = openpyxl.load_workbook(excel_path)
+
+    oft_updated, oft_skipped = _write_oft_rates(wb, all_rates, max_scan_rows=max_scan_rows)
+    rate_ref_written = _write_rate_ref(wb, rate_ref)
+
+    inland_updated, inland_skipped = 0, []
+    if ramp_rows:
+        inland_updated, inland_skipped = _write_us_inland(wb, ramp_rows)
+
+    out = output_path or excel_path
+    wb.save(out)
+
+    return {
+        "oft_updated":      oft_updated,
+        "oft_skipped":      oft_skipped,
+        "rate_ref_written": rate_ref_written,
+        "inland_updated":   inland_updated,
+        "inland_skipped":   inland_skipped,
+    }
+
+
+def update_oft_rates(excel_path, all_rates, output_path=None, max_scan_rows=38):
+    """
+    向後相容用：只更新 OFT sheet（不動 B1 / US inland）。
+    回傳 (updated_count, skipped_rows)。
+    """
+    wb = openpyxl.load_workbook(excel_path)
+    updated_count, skipped_rows = _write_oft_rates(wb, all_rates, max_scan_rows=max_scan_rows)
     out = output_path or excel_path
     wb.save(out)
     return updated_count, skipped_rows
