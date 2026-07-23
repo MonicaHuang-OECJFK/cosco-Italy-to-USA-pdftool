@@ -16,8 +16,8 @@ st.markdown("""
 - ✍️ Updates **OFT 20' / 40' / 40HC** in the cheatsheet
 - 🏷️ Updates the **Rate Reference** (e.g. "TLI GL JULY") in cheatsheet cell **OFT!B1**
 - 🚂 Updates **US inland 20DV / 40DV/40HQ** rates from the Rail Ramp table
-  — if the PDF lists **more than one rate period**, a separate updated cheatsheet is
-  produced **automatically for each period**
+  — if the PDF lists more than one rate period, a separate updated cheatsheet is
+  produced automatically for each period
 """)
 
 st.markdown("#### ⚠️ Important Notes")
@@ -25,10 +25,6 @@ st.markdown("""
 - If a PDF has **new or removed** POL/POD lanes, remember to add/delete the
   corresponding row in the cheatsheet, and add the matching pair to the **Mapping**
   tab with the **exact** POL/POD spelling as it appears in the PDF extraction
-- US inland rows are matched by **Location + Routing via** (e.g. "ATLANTA, GA" + "SAV")
-  — if a PDF adds/removes a rail ramp location, add/delete the matching row in the
-  **US inland** tab first. If the Location matches but the Routing via doesn't, the
-  row is **not** updated and is flagged for you to check instead
 """)
 
 st.markdown("<br>", unsafe_allow_html=True)
