@@ -14,10 +14,9 @@ st.markdown("#### 🔧 What this tool does")
 st.markdown("""
 - 📄 Extracts **Ocean Freight rates** from COSCO PDF (Direct Ports + Outports)
 - ✍️ Updates **OFT 20' / 40' / 40HC** in the cheatsheet
-- 🏷️ Updates the **Rate Reference** (e.g. "TLI GL JULY") in cheatsheet cell **OFT!B1**
+- 🏷️ Updates the **Rate Reference** (e.g. "TLI GL JULY") in cheatsheet cell 
 - 🚂 Updates **US inland 20DV / 40DV/40HQ** rates from the Rail Ramp table
-  — if the PDF lists **more than one rate period** (e.g. APRIL / MAY side by side),
-  a separate updated cheatsheet is produced **automatically for each period**
+  — if the PDF lists more than one rate period, a separate updated cheatsheet is produced automatically for each period
 """)
 
 st.markdown("#### ⚠️ Important Notes")
@@ -25,9 +24,6 @@ st.markdown("""
 - If a PDF has **new or removed** POL/POD lanes, remember to add/delete the
   corresponding row in the cheatsheet, and add the matching pair to the **Mapping**
   tab with the **exact** POL/POD spelling as it appears in the PDF extraction
-- US inland rows are matched by **Location** text (e.g. "ATLANTA, GA") — if a PDF
-  adds/removes a rail ramp location, add/delete the matching row in the
-  **US inland** tab first
 """)
 
 st.markdown("<br>", unsafe_allow_html=True)
@@ -101,6 +97,14 @@ if st.button("Run"):
                                           f"US inland rows with no matching PDF data"):
                             for row_num, location in result["inland_skipped"][:20]:
                                 st.text(f"  row {row_num}: Location={location}")
+
+                    if result["inland_mismatched"]:
+                        with st.expander(f"⚠️{label} {len(result['inland_mismatched'])} "
+                                          f"US inland rows skipped — Location matched but "
+                                          f"Routing via didn't (not written, please check)"):
+                            for row_num, location, cs_via, pdf_via in result["inland_mismatched"][:20]:
+                                st.text(f"  row {row_num}: Location={location}  "
+                                        f"cheatsheet Routing via={cs_via}  PDF VIA POD={pdf_via}")
 
                     file_name = (f"COSCO Italy to USA Eff {today_str}"
                                  f"{' ' + period if period else ''}.xlsx")

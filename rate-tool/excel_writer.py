@@ -176,9 +176,12 @@ def _write_us_inland(wb, ramp_rows, max_scan_rows=40):
     把 ramp_rows（extract_us_inland 產出）寫入 'US inland' sheet 的
     20DV / 40DV/40HQ 欄，用 Location 文字（大小寫不分）對照。
 
-    回傳 (updated_count, skipped_rows)
-      updated_count : 成功寫入的列數
-      skipped_rows  : cheatsheet 裡找不到對應 PDF 資料的 (row_num, location) list
+    回傳 (updated_count, skipped_rows, mismatched_rows)
+      updated_count    : 成功寫入的列數（Location + Routing via 都相符）
+      skipped_rows     : cheatsheet 裡找不到對應 Location 的 (row_num, location) list
+      mismatched_rows  : Location 相符但 Routing via 對不上的
+                          (row_num, location, cheatsheet_via_pod, pdf_via_pod) list
+                          （不會寫入，需要人工確認）
     """
     if "US inland" not in wb.sheetnames:
         raise ValueError("找不到 'US inland' tab")
@@ -186,6 +189,7 @@ def _write_us_inland(wb, ramp_rows, max_scan_rows=40):
     ws = wb["US inland"]
 
     header_row, loc_col = _find_header(ws, "Location")
+    _, via_col = _find_header(ws, "Routing via")
     _, col_20 = _find_header(ws, "20DV")
     _, col_40 = _find_header(ws, "40DV/40HQ")
 
@@ -196,6 +200,7 @@ def _write_us_inland(wb, ramp_rows, max_scan_rows=40):
 
     updated_count = 0
     skipped_rows = []
+    mismatched_rows = []
 
     for row_num in range(data_start_row, scan_end_row + 1):
         location = str(ws.cell(row_num, loc_col).value or "").strip().upper()
@@ -208,6 +213,20 @@ def _write_us_inland(wb, ramp_rows, max_scan_rows=40):
 
         ramp = ramp_lookup[location]
 
+        # Routing via 比對：PDF 的 via_pod 可能是合併寫法（例如 'ORF / NYC'），
+        # 也可能帶尾綴字（例如 'NYC only'）。用 '/' 切開後只取每段的第一個
+        # 詞（實際的港口代碼），忽略 'only' 這類描述字。
+        cheatsheet_via = str(ws.cell(row_num, via_col).value or "").strip().upper()
+        pdf_via_parts = [
+            p.strip().split()[0].upper()
+            for p in ramp["via_pod"].split("/")
+            if p.strip()
+        ]
+
+        if cheatsheet_via and cheatsheet_via not in pdf_via_parts:
+            mismatched_rows.append((row_num, location, cheatsheet_via, ramp["via_pod"]))
+            continue
+
         cell_20 = ws.cell(row_num, col_20)
         if cell_20.data_type != 'f':
             cell_20.value = ramp["rate_20"] if ramp["rate_20"] is not None else "-"
@@ -218,7 +237,7 @@ def _write_us_inland(wb, ramp_rows, max_scan_rows=40):
 
         updated_count += 1
 
-    return updated_count, skipped_rows
+    return updated_count, skipped_rows, mismatched_rows
 
 
 def update_cheatsheet(excel_path, all_rates, rate_ref=None, ramp_rows=None,
@@ -238,11 +257,12 @@ def update_cheatsheet(excel_path, all_rates, rate_ref=None, ramp_rows=None,
 
     回傳 dict：
       {
-        "oft_updated":   int,
-        "oft_skipped":   [(row_num, por, pod), ...],
+        "oft_updated":      int,
+        "oft_skipped":      [(row_num, por, pod), ...],
         "rate_ref_written": bool,
-        "inland_updated": int,
-        "inland_skipped": [(row_num, location), ...],
+        "inland_updated":   int,
+        "inland_skipped":   [(row_num, location), ...],
+        "inland_mismatched": [(row_num, location, cheatsheet_via, pdf_via), ...],
       }
     """
     wb = openpyxl.load_workbook(excel_path)
@@ -250,19 +270,20 @@ def update_cheatsheet(excel_path, all_rates, rate_ref=None, ramp_rows=None,
     oft_updated, oft_skipped = _write_oft_rates(wb, all_rates, max_scan_rows=max_scan_rows)
     rate_ref_written = _write_rate_ref(wb, rate_ref)
 
-    inland_updated, inland_skipped = 0, []
+    inland_updated, inland_skipped, inland_mismatched = 0, [], []
     if ramp_rows:
-        inland_updated, inland_skipped = _write_us_inland(wb, ramp_rows)
+        inland_updated, inland_skipped, inland_mismatched = _write_us_inland(wb, ramp_rows)
 
     out = output_path or excel_path
     wb.save(out)
 
     return {
-        "oft_updated":      oft_updated,
-        "oft_skipped":      oft_skipped,
-        "rate_ref_written": rate_ref_written,
-        "inland_updated":   inland_updated,
-        "inland_skipped":   inland_skipped,
+        "oft_updated":       oft_updated,
+        "oft_skipped":       oft_skipped,
+        "rate_ref_written":  rate_ref_written,
+        "inland_updated":    inland_updated,
+        "inland_skipped":    inland_skipped,
+        "inland_mismatched": inland_mismatched,
     }
 
 
